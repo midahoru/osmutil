@@ -148,7 +148,8 @@ def generate_isochrones(
     # Graph radius = max walkable distance + safety margin so edges aren't cut.
     margin_m = max_reach_m + GRAPH_BUFFER_MARGIN_M
 
-    polygons_wgs: list = []
+    # polygons_wgs: list = []
+    features_data: list = []
 
     for lat, lon in locs:
         log.info("Downloading walk graph around (%.6f, %.6f)...", lat, lon)
@@ -180,27 +181,38 @@ def generate_isochrones(
             to_wgs84 = Transformer.from_crs(
                 Gp.graph["crs"], "EPSG:4326", always_xy=True
             ).transform
-            polygons_wgs.append(shp_transform(to_wgs84, polygon_proj))
+            # polygons_wgs.append(shp_transform(to_wgs84, polygon_proj))
+            polygon_wgs = shp_transform(to_wgs84, polygon_proj)
+            features_data.append({
+                "polygon": polygon_wgs,
+                "lat": lat,
+                "lon": lon,
+                "reachable_nodes": n_nodes,
+            })
             log.info("  → %d reachable nodes", n_nodes)
         except Exception as e:
             log.error("Error processing (%.6f, %.6f): %s", lat, lon, e)
-
-    if not polygons_wgs:
+    if not features_data:
         return {"type": "FeatureCollection", "features": []}
 
-    merged = unary_union(polygons_wgs)
+    features = [
+        {
+            "type": "Feature",
+            "geometry": mapping(item["polygon"]),
+            "properties": {
+                "lat": item["lat"],
+                "lon": item["lon"],
+                "reachable_nodes": item["reachable_nodes"],
+                "time_minutes": time_minutes,
+                "walking_speed_kmh": walking_speed_kmh,
+            },
+        }
+        for item in features_data
+    ]
 
     return {
         "type": "FeatureCollection",
-        "features": [{
-            "type": "Feature",
-            "geometry": mapping(merged),
-            "properties": {
-                "time_minutes": time_minutes,
-                "walking_speed_kmh": walking_speed_kmh,
-                "location_count": len(locs),
-            },
-        }],
+        "features": features,
     }
 
 
@@ -232,7 +244,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="One or more 'lat,lon' coordinate pairs, space-separated.",
     )
     parser.add_argument(
-        "--time", type=float, required=True, metavar="MINUTES",
+        "--time", type=float, nargs="+", required=True, metavar="MINUTES",
         help="Walking time budget in minutes.",
     )
     parser.add_argument(
@@ -251,12 +263,21 @@ def main() -> None:
     args = _build_arg_parser().parse_args()
 
     locs = args.locations[0] if len(args.locations) == 1 else args.locations
-    geojson = generate_isochrones(
-        locations=locs,
-        time_minutes=args.time,
-        walking_speed_kmh=args.speed,
-    )
-    save_isochrones(geojson, args.output)
+
+    base = Path(args.output)
+
+    for t in args.time:
+        geojson = generate_isochrones(
+            locations=locs,
+            time_minutes=t,
+            walking_speed_kmh=args.speed,
+        )
+
+        # Incluye el tiempo en minutos en el nombre del archivo de salida
+        t_str = f"{t:g}".replace(".", "_") + "min"
+        out_path = base.with_stem(f"{base.stem}_{t_str}")
+
+        save_isochrones(geojson, str(out_path))
 
 
 if __name__ == "__main__":
