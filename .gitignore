@@ -7,6 +7,9 @@ __pycache__/
 # Python dynamic libraries
 *.pyd
 
+# Tex
+*.tex
+
 # Jupyter notebooks
 *.ipynb
 

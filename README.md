@@ -12,6 +12,8 @@ osmutil/
 │
 ├── src/
 │   ├── isochrone_generator.py        # Generates isochrones. Returns a GeoJSON
+│   ├── isodistance_generator.py      # Generates isodistances. Returns a GeoJSON  
+
 │
     ├── data/                         # Stores the resulting data
 │
@@ -23,13 +25,13 @@ osmutil/
 
 ## Quickstart
 
-### 1. Setup environment
+### Setup environment
 
 ```python
 pip install -r requirements.txt
 ```
 
-### 2. Isochrones
+### Isochrones
 
 
 ```bash
@@ -54,3 +56,7 @@ geojson = isochrone_generator.generate_isochrones(
 
 isochrone_generator.save_isochrones(geojson, "isocronas_test.geojson")
 ```
+
+
+### Isodistances
+

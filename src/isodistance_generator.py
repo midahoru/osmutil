@@ -1,20 +1,22 @@
 """
-isochrone_generator.py
-======================
-Generate walking isochrone polygons (GeoJSON) for one or more points using
+isodistance_generator.py
+========================
+Generate walking isodistance polygons (GeoJSON) for one or more points using
 OSMnx and OpenStreetMap data only. No API keys required.
 
 Optimized for sparse input data points: one small graph download per input point,
-instead of one giant bbox covering all of them.
+instead of one giant bbox covering all of them).
+The resulting isodistance polygons are merged into a single geometry at the end.
 
 Main methods:
-    generate_isochrones(locations, time_minutes, walking_speed_kmh) -> dict
-    save_isochrones(geojson, output_path) -> None
+    generate_isodistances(locations, distance_m) -> dict
+    build_points_layer(locations) -> dict
+    save_isodistances(geojson, output_path) -> None
 
 CLI:
-    python isochrone_generator.py \\
+    python isodistance_generator.py \\
         --locations 4.6588,-74.1313 4.6097,-74.0817 \\
-        --time 10 --speed 4.3 --output isocronas.geojson
+        --distance 500 --output isodistancias.geojson
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from shapely.ops import transform as shp_transform
 from shapely.ops import unary_union
 
 from configs.constants import (
-    DEFAULT_WALKING_SPEED_KMH,
     GRAPH_BUFFER_MARGIN_M,
     NODE_BUFFER_RADIUS_M,
 )
@@ -77,15 +78,16 @@ def _normalize_locations(locations) -> list[Coord]:
     raise ValueError("locations must be a (lat, lon) tuple or an iterable of them.")
 
 
-def _isochrone_geometry(
+def _isodistance_geometry(
     Gp: nx.MultiDiGraph,
     source: int,
-    time_limit_s: float,
+    distance_limit_m: float,
     buffer_m: float,
 ):
     """Return a Shapely polygon (in the graph's projected CRS) and node count."""
+    # Cut the network by walked distance along edges, not by travel time.
     lengths = nx.single_source_dijkstra_path_length(
-        Gp, source, cutoff=time_limit_s, weight="travel_time"
+        Gp, source, cutoff=distance_limit_m, weight="length"
     )
     if not lengths:
         return None, 0
@@ -115,39 +117,32 @@ def _isochrone_geometry(
     return polygon, len(lengths)
 
 
-def generate_isochrones(
+def generate_isodistances(
     locations,
-    time_minutes: float,
-    walking_speed_kmh: float = DEFAULT_WALKING_SPEED_KMH,
+    distance_m: float,
 ) -> dict:
-    """Build walking isochrones for one or more points and return their union.
+    """Build walking isodistances for one or more points and return their union.
 
     Downloads a small graph around each point individually (better than one
-    giant bbox when locations are sparse). The per-point isochrone polygons
+    giant bbox when locations are sparse). The per-point isodistance polygons
     are merged into a single geometry before being returned.
 
     Args:
         locations: A (lat, lon) tuple or an iterable of (lat, lon) tuples.
-        time_minutes: Walking time budget in minutes.
-        walking_speed_kmh: Uniform walking speed applied to every edge.
+        distance_m: Network distance budget in metres, walked along edges.
 
     Returns:
-        GeoJSON FeatureCollection with a single Feature: the union of all
-        isochrone polygons. Properties: time_minutes, walking_speed_kmh,
-        location_count.
+        GeoJSON FeatureCollection with one Feature per location: the
+        isodistance polygon. Properties: distance_m, reachable_nodes, lat, lon.
     """
     locs = _normalize_locations(locations)
 
-    if time_minutes <= 0 or walking_speed_kmh <= 0:
-        raise ValueError("time_minutes and walking_speed_kmh must be positive.")
+    if distance_m <= 0:
+        raise ValueError("distance_m must be positive.")
 
-    speed_ms = walking_speed_kmh / 3.6
-    time_limit_s = time_minutes * 60.0
-    max_reach_m = speed_ms * time_limit_s
     # Graph radius = max walkable distance + safety margin so edges aren't cut.
-    margin_m = max_reach_m + GRAPH_BUFFER_MARGIN_M
+    margin_m = distance_m + GRAPH_BUFFER_MARGIN_M
 
-    # polygons_wgs: list = []
     features_data: list = []
 
     for lat, lon in locs:
@@ -163,13 +158,10 @@ def generate_isochrones(
 
             Gp = ox.project_graph(G)
 
-            for _, _, data in Gp.edges(data=True):
-                data["travel_time"] = data.get("length", 0.0) / speed_ms
-
             node = ox.distance.nearest_nodes(G, X=lon, Y=lat)
 
-            polygon_proj, n_nodes = _isochrone_geometry(
-                Gp, node, time_limit_s, NODE_BUFFER_RADIUS_M
+            polygon_proj, n_nodes = _isodistance_geometry(
+                Gp, node, distance_m, NODE_BUFFER_RADIUS_M
             )
 
             if polygon_proj is None or polygon_proj.is_empty:
@@ -180,7 +172,6 @@ def generate_isochrones(
             to_wgs84 = Transformer.from_crs(
                 Gp.graph["crs"], "EPSG:4326", always_xy=True
             ).transform
-            # polygons_wgs.append(shp_transform(to_wgs84, polygon_proj))
             polygon_wgs = shp_transform(to_wgs84, polygon_proj)
             features_data.append({
                 "polygon": polygon_wgs,
@@ -202,8 +193,7 @@ def generate_isochrones(
                 "lat": item["lat"],
                 "lon": item["lon"],
                 "reachable_nodes": item["reachable_nodes"],
-                "time_minutes": time_minutes,
-                "walking_speed_kmh": walking_speed_kmh,
+                "distance_m": distance_m,
             },
         }
         for item in features_data
@@ -215,12 +205,26 @@ def generate_isochrones(
     }
 
 
-def save_isochrones(geojson: dict, file_name: str) -> None:
+def build_points_layer(locations) -> dict:
+    """Return a GeoJSON FeatureCollection with the input points used."""
+    locs = _normalize_locations(locations)
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {"lat": lat, "lon": lon},
+        }
+        for lat, lon in locs
+    ]
+    return {"type": "FeatureCollection", "features": features}
+
+
+def save_isodistances(geojson: dict, file_name: str) -> None:
     """Write a GeoJSON FeatureCollection to disk."""
-    output_path = os.path.join('..\\data', file_name) 
+    output_path = os.path.join('..\\data', file_name)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(geojson, f, ensure_ascii=False, indent=2)
-    log.info("Saved %d isochrone(s) to %s", len(geojson.get("features", [])), output_path)
+    log.info("Saved %d feature(s) to %s", len(geojson.get("features", [])), output_path)
 
 
 def _parse_latlon(s: str) -> Coord:
@@ -234,7 +238,7 @@ def _parse_latlon(s: str) -> Coord:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Walking isochrones from OpenStreetMap (OSMnx).",
+        description="Walking isodistances from OpenStreetMap (OSMnx).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -243,16 +247,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="One or more 'lat,lon' coordinate pairs, space-separated.",
     )
     parser.add_argument(
-        "--time", type=float, nargs="+", required=True, metavar="MINUTES",
-        help="Walking time budget in minutes.",
+        "--distance", type=float, nargs="+", required=True, metavar="METRES",
+        help="Network distance budget in metres.",
     )
     parser.add_argument(
-        "--speed", type=float, default=DEFAULT_WALKING_SPEED_KMH, metavar="KMH",
-        help=f"Walking speed in km/h (default: {DEFAULT_WALKING_SPEED_KMH}).",
-    )
-    parser.add_argument(
-        "--output", default="isochrones.geojson",
-        help="Output GeoJSON path (default: isochrones.geojson).",
+        "--output", default="isodistances.geojson",
+        help="Output GeoJSON path (default: isodistances.geojson).",
     )
     return parser
 
@@ -265,18 +265,22 @@ def main() -> None:
 
     base = Path(args.output)
 
-    for t in args.time:
-        geojson = generate_isochrones(
+    # Capa con los puntos de entrada usados
+    points_geojson = build_points_layer(locs)
+    points_path = base.with_stem(f"{base.stem}_points")
+    save_isodistances(points_geojson, str(points_path))
+
+    for d in args.distance:
+        geojson = generate_isodistances(
             locations=locs,
-            time_minutes=t,
-            walking_speed_kmh=args.speed,
+            distance_m=d,
         )
 
-        # Incluye el tiempo en minutos en el nombre del archivo de salida
-        t_str = f"{t:g}".replace(".", "_") + "min"
-        out_path = base.with_stem(f"{base.stem}_{t_str}")
+        # Incluye la distancia en metros en el nombre del archivo de salida
+        d_str = f"{d:g}".replace(".", "_") + "m"
+        out_path = base.with_stem(f"{base.stem}_{d_str}")
 
-        save_isochrones(geojson, str(out_path))
+        save_isodistances(geojson, str(out_path))
 
 
 if __name__ == "__main__":
